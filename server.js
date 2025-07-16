@@ -415,3 +415,5 @@ app.listen(PORT, () => {
   console.log(`📞 Gupshup Sender: ${process.env.GUPSHUP_SENDER || 'Not set'}`);
   console.log(`📝 Template Name: ${process.env.GUPSHUP_TEMPLATE_NAME || 'otp_verification_code'}`);
 });
+
+
