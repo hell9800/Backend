@@ -23,7 +23,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// OTP Store
+// OTP Store and Rate Limiting
 const otpStore = new Map();
 const rateLimitStore = new Map();
 
@@ -60,11 +60,13 @@ const validatePhoneNumber = (phone) => /^[6-9]\d{9}$/.test(phone);
 
 const sendWhatsAppOtpGupshup = async (phone, otp) => {
   try {
-    const GUPSHUP_API_KEY = process.env.GUPSHUP_API_KEY;
-    const GUPSHUP_SENDER = process.env.GUPSHUP_SENDER;
-    const GUPSHUP_APP_NAME = process.env.GUPSHUP_APP_NAME || "GupshupApp";
-    const GUPSHUP_TEMPLATE_NAME = process.env.GUPSHUP_TEMPLATE_NAME || "otp_verification_code";
-    const otpExpiryMinutes = parseInt(process.env.OTP_EXPIRY_MINUTES) || 5;
+    const {
+      GUPSHUP_API_KEY,
+      GUPSHUP_SENDER,
+      GUPSHUP_APP_NAME = "GupshupApp",
+      GUPSHUP_TEMPLATE_NAME = "otp_verification_code",
+      OTP_EXPIRY_MINUTES = 5
+    } = process.env;
 
     if (!GUPSHUP_API_KEY || !GUPSHUP_SENDER || !GUPSHUP_TEMPLATE_NAME) {
       throw new Error("Gupshup credentials or template name missing");
@@ -78,7 +80,7 @@ const sendWhatsAppOtpGupshup = async (phone, otp) => {
       destination: formattedPhone,
       "src.name": GUPSHUP_APP_NAME,
       template: GUPSHUP_TEMPLATE_NAME,
-      "template.params": `${otp}|${otpExpiryMinutes}`
+      "template.params": `${otp}|${OTP_EXPIRY_MINUTES}`
     });
 
     const response = await axios.post(
@@ -93,35 +95,35 @@ const sendWhatsAppOtpGupshup = async (phone, otp) => {
       }
     );
 
-    if (response.data?.status === "submitted" || 
-        response.data?.status === "queued" || 
-        response.data?.messageId) {
+    if (["submitted", "queued"].includes(response.data?.status) || response.data?.messageId) {
       return {
         success: true,
         messageId: response.data.messageId,
         status: response.data.status
       };
     } else {
-      throw new Error(`Gupshup API returned unexpected response: ${JSON.stringify(response.data)}`);
+      throw new Error(`Unexpected Gupshup response: ${JSON.stringify(response.data)}`);
     }
 
   } catch (error) {
     if (error.response) {
-      if (error.response.status === 401) {
-        throw new Error("Invalid Gupshup API key");
-      } else if (error.response.status === 400) {
-        throw new Error(`Bad request: ${error.response.data?.message || 'Invalid parameters'}`);
-      } else if (error.response.status === 429) {
-        throw new Error("Rate limit exceeded on Gupshup API");
+      const msg = error.response.data?.message || "Invalid parameters";
+      switch (error.response.status) {
+        case 401:
+          throw new Error("Invalid Gupshup API key");
+        case 400:
+          throw new Error(`Bad request: ${msg}`);
+        case 429:
+          throw new Error("Rate limit exceeded on Gupshup API");
       }
     } else if (error.request) {
       throw new Error("No response from Gupshup API");
     }
-    throw new Error(`Failed to send OTP via Gupshup: ${error.message}`);
+    throw new Error(`Gupshup error: ${error.message}`);
   }
 };
 
-// Health check
+// Health Check
 app.get("/health", (req, res) => {
   res.json({
     status: "OK",
@@ -136,27 +138,30 @@ app.get("/health", (req, res) => {
   });
 });
 
-// Send OTP with consent
+// Root Route
+app.get("/", (req, res) => {
+  res.send("🚀 OTP Backend is live!");
+});
+
+// Send OTP Endpoint
 app.post("/send-otp", async (req, res) => {
   try {
     const { phone, consentGiven } = req.body;
 
-    if (!phone) {
-      return res.status(400).json({ success: false, message: "Phone number is required" });
-    }
+    if (!phone) return res.status(400).json({ success: false, message: "Phone number is required" });
 
     const normalizedPhone = phone.replace(/\D/g, '').replace(/^91/, '');
 
     if (!validatePhoneNumber(normalizedPhone)) {
-      return res.status(400).json({ success: false, message: "Invalid Indian phone number format" });
+      return res.status(400).json({ success: false, message: "Invalid Indian phone number" });
     }
 
     if (!consentGiven) {
-      return res.status(400).json({ success: false, message: "User consent for WhatsApp communication is required" });
+      return res.status(400).json({ success: false, message: "User consent is required" });
     }
 
     if (!checkRateLimit(normalizedPhone)) {
-      return res.status(429).json({ success: false, message: "Too many OTP requests. Try after 1 hour." });
+      return res.status(429).json({ success: false, message: "Too many OTP requests. Try again in 1 hour." });
     }
 
     const otp = generateOTP();
@@ -188,27 +193,29 @@ app.post("/send-otp", async (req, res) => {
   }
 });
 
+// 404 Handler
 app.use("*", (req, res) => {
   res.status(404).json({ success: false, message: "Endpoint not found" });
 });
 
+// Graceful Shutdown
 process.on('SIGINT', () => {
-  console.log('Received SIGINT. Exiting...');
+  console.log('🛑 Received SIGINT. Exiting...');
   process.exit(0);
 });
-
 process.on('SIGTERM', () => {
-  console.log('Received SIGTERM. Exiting...');
+  console.log('🛑 Received SIGTERM. Exiting...');
   process.exit(0);
 });
 
-mongoose.connect(process.env.MONGO_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-}).then(() => {
-  app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
+// MongoDB Connection (✅ FIXED)
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`✅ Connected to MongoDB`);
+      console.log(`🚀 Server running on port ${PORT}`);
+    });
+  })
+  .catch(err => {
+    console.error("❌ MongoDB connection error:", err);
   });
-}).catch(err => {
-  console.error("❌ MongoDB connection error:", err);
-});
